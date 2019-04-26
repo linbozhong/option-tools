@@ -4,6 +4,35 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+OPTION_BASIC_FIELD = [
+    'id',
+    'code',
+    'trading_code',
+    'name',
+    'contract_type',
+    'exchange_code',
+    'underlying_symbol',
+    'underlying_type',
+    'exercise_price',
+    'contract_unit',
+    'list_date',
+    'last_trade_date'
+]
+
+OPTION_DAILY_FIELD = [
+    'code',
+    'exchange_code',
+    'date',
+    'open',
+    'high',
+    'low',
+    'close',
+    'settle_price',
+    'volume',
+    'money',
+    'position'
+]
+
 
 class BaseConnectConfig(object):
     URL = ''
