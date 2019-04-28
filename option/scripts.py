@@ -8,7 +8,7 @@ import calendar
 from dateutil.relativedelta import relativedelta
 from datetime import datetime, date, time, timedelta
 from jqdatasdk import opt, query
-from option.setting import connect_config, OPTION_BASIC_FIELD, OPTION_DAILY_FIELD
+from option.setting import connect_config, OPTION_BASIC_FIELD, OPTION_DAILY_FIELD, BAR_PREV_TRADE_DAYS
 from option.common import str_to_dt, dt_to_str, date_to_dt
 from option.log import logger
 from option.const import *
@@ -73,28 +73,31 @@ def insert_to_db(data_df, db_name, col_name, index_filed=None):
     :return:
     """
     client = get_mongo_client()
-    db = client[db_name]
-    col = db[col_name]
+    col = client[db_name][col_name]
     if index_filed is not None:
-        index_list = [(field, pymongo.ASCENDING) for field in index_filed]
-        col.create_index(index_list)
+        if not col.index_information():
+            index_list = [(field, pymongo.ASCENDING) for field in index_filed]
+            col.create_index(index_list)
     data_list = data_df.to_dict(orient='records')
     col.insert_many(data_list)
 
 
-def get_db_latest_record(db_name, col_name):
+def get_db_latest_record(db_name, col_name, field=None, *args, **kwargs):
     """
     :param db_name: str
     :param col_name: str
+    :param field: str
     :return: dict
     """
     client = get_mongo_client()
     col = client[db_name][col_name]
+    if field is None:
+        field = '_id'
     if not col.count():
         doc = None
     else:
-        cursor = col.find().limit(1).sort('_id', pymongo.DESCENDING)
-        doc = cursor.next()
+        cursor = col.find(*args, **kwargs).limit(1).sort(field, pymongo.DESCENDING)
+        doc = None if cursor.count() == 0 else cursor.next()
     return doc
 
 
@@ -140,7 +143,30 @@ def normalize_daily_format(gateway_name, data_df):
 
 
 def normalize_bar_format(gateway_name, data_df):
-    pass
+    """
+    :param gateway_name: str
+    :param data_df: pandas.DataFrame
+    :return: pandas.DataFrame
+    """
+    if gateway_name == 'jqdata':
+        data_df['datetime'] = data_df.index
+        return data_df
+    elif gateway_name == 'tushare':
+        pass
+
+
+def get_trade_days(gateway_name, start_date):
+    """
+    :param gateway_name: str
+    :param start_date: datetime/date/str
+    :return: pandas.DataFrame
+    """
+    sdk = get_data_sdk(gateway_name)
+    if gateway_name == 'jqdata':
+        trade_days = sdk.get_trade_days(start_date=start_date)
+        trade_days = [date_to_dt(date) for date in trade_days]
+        data_df = pd.DataFrame(trade_days, columns=['date'])
+        return data_df
 
 
 def get_option_basic(gateway_name, underlying_symbol, latest_id):
@@ -185,7 +211,21 @@ def get_option_daily(gateway_name, exchange_code, trade_date):
 
 
 def get_option_bar(gateway_name, code, start_date, end_date):
-    pass
+    """
+    :param gateway_name: str
+    :param code: str
+    :param start_date: datetime/date/str
+    :param end_date: datetime/date/str
+    :return: pandas.DataFrame
+    """
+    sdk = get_data_sdk(gateway_name)
+    if gateway_name == 'jqdata':
+        df = sdk.get_price(code, start_date=start_date, end_date=end_date, frequency='1m')
+        df.dropna(inplace=True)
+        df['code'] = code
+        return df
+    elif gateway_name == 'tushare':
+        pass
 
 
 def read_month_contracts(underlying_symbol, year, month):
@@ -200,7 +240,7 @@ def read_month_contracts(underlying_symbol, year, month):
     last_date = datetime(year, month, last)
 
     flt = {'last_trade_date': {'$gt': first_date, '$lt': last_date}}
-    output_field = ['code', 'trading_code', 'list_date', 'last_trade_date']
+    output_field = ['code', 'trading_code', 'underlying_symbol', 'list_date', 'last_trade_date']
     cursor = get_db_records(OPTION_BASIC, underlying_symbol, filter=flt, projection=output_field)
 
     res_list = [rec for rec in cursor if 'A' not in rec['trading_code']]
@@ -224,6 +264,25 @@ def read_near_and_far_contracts(underlying_symbol):
     else:
         far_list = read_month_contracts(underlying_symbol, today_next_month.year, today_next_month.month)
     return near_list, far_list
+
+
+def save_trade_days(gateway_name):
+    """
+    :param gateway_name: str
+    :return:
+    """
+    latest_record = get_db_latest_record(TRADE_DAY, TRADE_DAY)
+    latest_date = datetime(2005, 1, 1) if latest_record is None else latest_record['date']
+    start_date = latest_date + timedelta(days=1)
+    data_df = get_trade_days(gateway_name, start_date)
+    if not data_df.empty:
+        insert_to_db(data_df, TRADE_DAY, TRADE_DAY, index_filed=['date'])
+        logger.info(LOG_TRADE_DAY_UPDATE.format(gateway_name,
+                                                dt_to_str(start_date),
+                                                len(data_df)))
+    else:
+        logger.info(LOG_TRADE_DAY_NEWEST.format(gateway_name,
+                                                dt_to_str(start_date)))
 
 
 def save_option_basic(gateway_name, underlying_symbol):
@@ -256,9 +315,7 @@ def save_option_daily(gateway_name, exchange_code):
     latest_record = get_db_latest_record(OPTION_DAILY, exchange_code)
     latest_date = str_to_dt('2019-04-19') if latest_record is None else latest_record['date']
     today = datetime.combine(date.today(), time.min)
-    if latest_date >= today:
-        logger.info(LOG_DAILY_NEWEST.format(gateway_name, exchange_code))
-    else:
+    if latest_date < today:
         while latest_date < today:
             latest_date += timedelta(days=1)
             data_df = get_option_daily(gateway_name, exchange_code, dt_to_str(latest_date))
@@ -269,9 +326,53 @@ def save_option_daily(gateway_name, exchange_code):
                                                     exchange_code,
                                                     dt_to_str(latest_date),
                                                     len(data_df)))
+            else:
+                logger.info(LOG_DAILY_NEWEST.format(gateway_name,
+                                                    exchange_code,
+                                                    dt_to_str(latest_date)))
+
+
+def save_option_bar(gateway_name, underlying_symbol):
+    """
+    :param gateway_name: str
+    :param underlying_symbol: str
+    :return:
+    """
+    today = datetime.combine(date.today(), time.min)
+    prev_trade_days = get_db_records(TRADE_DAY, TRADE_DAY, {'date': {'$lte': today}})
+    bar_days = [rec['date'] for rec in list(prev_trade_days)[-BAR_PREV_TRADE_DAYS:]]
+    init_start_date = bar_days[0]
+    end_date = bar_days[-1]
+
+    near_list, far_list = read_near_and_far_contracts(underlying_symbol)
+    all_list = []
+    all_list.extend(near_list)
+    all_list.extend(far_list)
+    for contract in all_list:
+        code = contract['code']
+        flt = {'code': code}
+        latest_record = get_db_latest_record(OPTION_BAR, underlying_symbol, filter=flt)
+        start_date = init_start_date if latest_record is None else latest_record['datetime'] + timedelta(minutes=1)
+        if start_date > end_date.replace(hour=15):
+            logger.info('{}: Bar Trading Timestamp is newest.'.format(code))
+        else:
+            data_df = get_option_bar(gateway_name, code, start_date, end_date.replace(hour=16))
+            if not data_df.empty:
+                data_df = normalize_bar_format(gateway_name, data_df)
+                insert_to_db(data_df, OPTION_BAR, underlying_symbol, index_filed=['code', 'datetime'])
+                logger.info(LOG_BAR_UPDATE.format(gateway_name,
+                                                  code,
+                                                  start_date,
+                                                  len(data_df)))
+            else:
+                logger.info(LOG_BAR_NEWEST.format(gateway_name,
+                                                  code,
+                                                  start_date))
 
 
 if __name__ == '__main__':
+    save_trade_days('jqdata')
+
     save_option_basic('jqdata', '510050')
     save_option_daily('jqdata', 'XSHG')
     # df.to_csv('basic_test.csv')
@@ -280,6 +381,8 @@ if __name__ == '__main__':
     # [print(i) for i in l]
     # print(len(l))
 
-    near, far = read_near_and_far_contracts('510050')
-    [print(i) for i in near]
-    [print(i) for i in far]
+    # near, far = read_near_and_far_contracts('510050')
+    # [print(i) for i in near]
+    # [print(i) for i in far]
+
+    # save_option_bar('jqdata', '510050')

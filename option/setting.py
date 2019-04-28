@@ -33,6 +33,8 @@ OPTION_DAILY_FIELD = [
     'position'
 ]
 
+BAR_PREV_TRADE_DAYS = 2
+
 
 class BaseConnectConfig(object):
     URL = ''
