@@ -34,6 +34,7 @@ OPTION_DAILY_FIELD = [
 ]
 
 BAR_PREV_TRADE_DAYS = 2
+QVIX_URL = 'http://1.optbbs.com/d/csv/d/vixk.csv'
 
 
 class BaseConnectConfig(object):

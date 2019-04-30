@@ -5,10 +5,13 @@ import jqdatasdk as jq
 import tushare as ts
 import pandas as pd
 import calendar
+import requests
+import csv
+from io import StringIO
 from dateutil.relativedelta import relativedelta
 from datetime import datetime, date, time, timedelta
 from jqdatasdk import opt, query
-from option.setting import connect_config, OPTION_BASIC_FIELD, OPTION_DAILY_FIELD, BAR_PREV_TRADE_DAYS
+from option.setting import connect_config, OPTION_BASIC_FIELD, OPTION_DAILY_FIELD, BAR_PREV_TRADE_DAYS, QVIX_URL
 from option.common import str_to_dt, dt_to_str, date_to_dt
 from option.log import logger
 from option.const import *
@@ -228,6 +231,25 @@ def get_option_bar(gateway_name, code, start_date, end_date):
         pass
 
 
+def get_underlying(gateway_name, code, start_date, end_date, freq):
+    """
+    :param gateway_name: str
+    :param code: str
+    :param start_date: date/datetime/str
+    :param end_date: date/datetime/str
+    :param freq: str
+    :return: pandas.DataFrame
+    """
+    sdk = get_data_sdk(gateway_name)
+    if gateway_name == 'jqdata':
+        code = '{}.{}'.format(code, UNDERLYING_EXCHANGE_MAP[code])
+        df = sdk.get_price(code.upper(), start_date, end_date, frequency=freq)
+        df['datetime'] = df.index
+        return df
+    elif gateway_name == 'tushare':
+        pass
+
+
 def read_month_contracts(underlying_symbol, year, month):
     """
     :param underlying_symbol: str
@@ -241,7 +263,7 @@ def read_month_contracts(underlying_symbol, year, month):
 
     flt = {'last_trade_date': {'$gt': first_date, '$lt': last_date}}
     output_field = ['code', 'trading_code', 'underlying_symbol', 'list_date', 'last_trade_date']
-    cursor = get_db_records(OPTION_BASIC, underlying_symbol, filter=flt, projection=output_field)
+    cursor = get_db_records(OPT_OPTION_BASIC, underlying_symbol, filter=flt, projection=output_field)
 
     res_list = [rec for rec in cursor if 'A' not in rec['trading_code']]
     return res_list
@@ -271,12 +293,12 @@ def save_trade_days(gateway_name):
     :param gateway_name: str
     :return:
     """
-    latest_record = get_db_latest_record(TRADE_DAY, TRADE_DAY)
+    latest_record = get_db_latest_record(OPT_TRADE_DAY, OPT_TRADE_DAY)
     latest_date = datetime(2005, 1, 1) if latest_record is None else latest_record['date']
     start_date = latest_date + timedelta(days=1)
     data_df = get_trade_days(gateway_name, start_date)
     if not data_df.empty:
-        insert_to_db(data_df, TRADE_DAY, TRADE_DAY, index_filed=['date'])
+        insert_to_db(data_df, OPT_TRADE_DAY, OPT_TRADE_DAY, index_filed=['date'])
         logger.info(LOG_TRADE_DAY_UPDATE.format(gateway_name,
                                                 dt_to_str(start_date),
                                                 len(data_df)))
@@ -285,18 +307,51 @@ def save_trade_days(gateway_name):
                                                 dt_to_str(start_date)))
 
 
+def save_underlying(gateway_name, code, freq):
+    """
+    :param gateway_name: str
+    :param code: str
+    :param freq: str. 'daily' or '1m'
+    :return:
+    """
+    if freq == 'daily':
+        col_name = '{}.daily'.format(code)
+        delta = timedelta(days=1)
+    else:
+        col_name = '{}.bar'.format(code)
+        delta = timedelta(minutes=1)
+
+    latest_record = get_db_latest_record(OPT_UNDERLYING, col_name)
+    latest_date = datetime(2019, 4, 19) if latest_record is None else latest_record['datetime']
+    start_date = latest_date + delta
+    end_date = datetime.combine(date.today(), time.min).replace(hour=16)
+    data_df = get_underlying(gateway_name, code, start_date, end_date, freq)
+    if not data_df.empty:
+        insert_to_db(data_df, OPT_UNDERLYING, col_name, index_filed=['datetime'])
+        logger.info(LOG_UNDERLYING_UPDATE.format(gateway_name,
+                                                 freq,
+                                                 code,
+                                                 dt_to_str(start_date),
+                                                 len(data_df)))
+    else:
+        logger.info(LOG_UNDERLYING_NEWEST.format(gateway_name,
+                                                 freq,
+                                                 code,
+                                                 dt_to_str(start_date)))
+
+
 def save_option_basic(gateway_name, underlying_symbol):
     """
     :param gateway_name: str
     :param underlying_symbol: str
     :return:
     """
-    latest_record = get_db_latest_record(OPTION_BASIC, underlying_symbol)
+    latest_record = get_db_latest_record(OPT_OPTION_BASIC, underlying_symbol)
     latest_id = 0 if latest_record is None else latest_record['id']
     data_df = get_option_basic(gateway_name, underlying_symbol, latest_id)
     if not data_df.empty:
         data_df = normalize_basic_format(gateway_name, data_df)
-        insert_to_db(data_df, OPTION_BASIC, underlying_symbol,
+        insert_to_db(data_df, OPT_OPTION_BASIC, underlying_symbol,
                      index_filed=['id', 'list_date', 'last_trade_date'])
         logger.info(LOG_BASIC_UPDATE.format(gateway_name,
                                             underlying_symbol,
@@ -312,7 +367,7 @@ def save_option_daily(gateway_name, exchange_code):
     :param exchange_code: str
     :return:
     """
-    latest_record = get_db_latest_record(OPTION_DAILY, exchange_code)
+    latest_record = get_db_latest_record(OPT_OPTION_DAILY, exchange_code)
     latest_date = str_to_dt('2019-04-19') if latest_record is None else latest_record['date']
     today = datetime.combine(date.today(), time.min)
     if latest_date < today:
@@ -321,7 +376,7 @@ def save_option_daily(gateway_name, exchange_code):
             data_df = get_option_daily(gateway_name, exchange_code, dt_to_str(latest_date))
             if not data_df.empty:
                 data_df = normalize_daily_format(gateway_name, data_df)
-                insert_to_db(data_df, OPTION_DAILY, exchange_code, index_filed=['date', 'code'])
+                insert_to_db(data_df, OPT_OPTION_DAILY, exchange_code, index_filed=['date', 'code'])
                 logger.info(LOG_DAILY_UPDATE.format(gateway_name,
                                                     exchange_code,
                                                     dt_to_str(latest_date),
@@ -339,7 +394,7 @@ def save_option_bar(gateway_name, underlying_symbol):
     :return:
     """
     today = datetime.combine(date.today(), time.min)
-    prev_trade_days = get_db_records(TRADE_DAY, TRADE_DAY, {'date': {'$lte': today}})
+    prev_trade_days = get_db_records(OPT_TRADE_DAY, OPT_TRADE_DAY, {'date': {'$lte': today}})
     bar_days = [rec['date'] for rec in list(prev_trade_days)[-BAR_PREV_TRADE_DAYS:]]
     init_start_date = bar_days[0]
     end_date = bar_days[-1]
@@ -351,7 +406,7 @@ def save_option_bar(gateway_name, underlying_symbol):
     for contract in all_list:
         code = contract['code']
         flt = {'code': code}
-        latest_record = get_db_latest_record(OPTION_BAR, underlying_symbol, filter=flt)
+        latest_record = get_db_latest_record(OPT_OPTION_BAR, underlying_symbol, filter=flt)
         start_date = init_start_date if latest_record is None else latest_record['datetime'] + timedelta(minutes=1)
         if start_date > end_date.replace(hour=15):
             logger.info('{}: Bar Trading Timestamp is newest.'.format(code))
@@ -359,7 +414,7 @@ def save_option_bar(gateway_name, underlying_symbol):
             data_df = get_option_bar(gateway_name, code, start_date, end_date.replace(hour=16))
             if not data_df.empty:
                 data_df = normalize_bar_format(gateway_name, data_df)
-                insert_to_db(data_df, OPTION_BAR, underlying_symbol, index_filed=['code', 'datetime'])
+                insert_to_db(data_df, OPT_OPTION_BAR, underlying_symbol, index_filed=['code', 'datetime'])
                 logger.info(LOG_BAR_UPDATE.format(gateway_name,
                                                   code,
                                                   start_date,
@@ -370,12 +425,45 @@ def save_option_bar(gateway_name, underlying_symbol):
                                                   start_date))
 
 
+def get_vix():
+    resp = requests.get(QVIX_URL)
+    data_file = StringIO(resp.text)
+    csv_reader = csv.DictReader(data_file)
+    csv_list = list(csv_reader)
+    df = pd.DataFrame(csv_list)
+    df.columns = ['datetime', 'open', 'high', 'low', 'close']
+    df.datetime = df.datetime.map(lambda tstamp: datetime.fromtimestamp(float(tstamp) / 1000))
+    return df
+
+
+def save_vix():
+    latest_record = get_db_latest_record(OPT_VIX, OPT_VIX_DAILY)
+    latest_date = datetime(2015, 2, 1) if latest_record is None else latest_record['datetime']
+    data_df = get_vix()
+    if not data_df.empty:
+        data_df = data_df[data_df.datetime > latest_date]
+        if not data_df.empty:
+            insert_to_db(data_df, OPT_VIX, OPT_VIX_DAILY, index_filed=['datetime'])
+            logger.info(LOG_VIX_UPDATE.format(dt_to_str(latest_date),
+                                              len(data_df)))
+        else:
+            logger.info(LOG_VIX_NEWEST.format(dt_to_str(latest_date)))
+
+    else:
+        logger.info(LOG_VIX_ERROR)
+
+
 if __name__ == '__main__':
     save_trade_days('jqdata')
 
     save_option_basic('jqdata', '510050')
     save_option_daily('jqdata', 'XSHG')
+
+    save_underlying('jqdata', '510050', 'daily')
+    save_underlying('jqdata', '510050', '1m')
     # df.to_csv('basic_test.csv')
+
+    save_vix()
 
     # l = read_month_contracts('510050', 2019, 6)
     # [print(i) for i in l]
