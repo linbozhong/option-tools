@@ -11,7 +11,7 @@ from io import StringIO
 from dateutil.relativedelta import relativedelta
 from datetime import datetime, date, time, timedelta
 from jqdatasdk import opt, query
-from option.setting import connect_config, OPTION_BASIC_FIELD, OPTION_DAILY_FIELD, BAR_PREV_TRADE_DAYS, QVIX_URL
+from option.settings import connect_config, OPTION_BASIC_FIELD, OPTION_DAILY_FIELD, BAR_PREV_TRADE_DAYS, QVIX_URL
 from option.common import str_to_dt, dt_to_str, date_to_dt
 from option.log import logger
 from option.const import *
